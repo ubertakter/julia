@@ -1,6 +1,6 @@
 # This file is a part of Julia. License is MIT: https://julialang.org/license
 
-using Core: CodeInfo, SimpleVector, donotdelete, compilerbarrier, memoryrefnew, memoryrefget, memoryrefset!
+using Core: CodeInfo, SimpleVector, compilerbarrier, memoryrefnew, memoryrefget, memoryrefset!
 
 const Callable = Union{Function,Type}
 
@@ -1261,3 +1261,5 @@ typename(typeof(function < end)).constprop_heuristic  = Core.SAMETYPE_HEURISTIC
 typename(typeof(function > end)).constprop_heuristic  = Core.SAMETYPE_HEURISTIC
 typename(typeof(function << end)).constprop_heuristic = Core.SAMETYPE_HEURISTIC
 typename(typeof(function >> end)).constprop_heuristic = Core.SAMETYPE_HEURISTIC
+
+donotdelete(args...) = Core.donotdelete(args...)
