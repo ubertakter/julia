@@ -448,8 +448,8 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *trypoptask, jl_value_t *q, 
     uint64_t start_cycles = 0;
     // Don't count as spinning for the first spin iteration
     int is_spinning = 0;
-    assert(jl_atomic_load_relaxed(&jl_n_threads_spinning) >= 0 && jl_atomic_load_relaxed(&jl_n_threads_spinning) <= jl_n_threads);
-    assert(jl_atomic_load_relaxed(&n_threads_idle) >= 0 && jl_atomic_load_relaxed(&n_threads_idle) <= jl_n_threads);
+    assert(jl_atomic_load_relaxed(&jl_n_threads_spinning) >= 0 && jl_atomic_load_relaxed(&jl_n_threads_spinning) <= jl_atomic_load_relaxed(&jl_n_threads));
+    assert(jl_atomic_load_relaxed(&n_threads_idle) >= 0 && jl_atomic_load_relaxed(&n_threads_idle) <= jl_atomic_load_relaxed(&jl_n_threads));
     while (1) {
         jl_task_t *task = get_next_task(trypoptask, q);
         if (task) {
