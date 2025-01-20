@@ -392,7 +392,7 @@ static int may_sleep(jl_ptls_t ptls) JL_NOTSAFEPOINT
 // The barrier here guarantees that if a waker observes 0 idle threads after submitting work, then the thread going to sleep must have checked that work was available
 
 
-// add_spinner must always be preceded by a seq-cst fence, it's not here to avoid an unnessary fence in the julia code that calls this
+// add_spinner must always be preceded by a seq-cst fence, it's not here to avoid an unnecessary fence in the julia code that calls this
 STATIC_INLINE void add_spinner(jl_task_t *ct) JL_NOTSAFEPOINT
 {
     // Find sleeping thread to wake up
