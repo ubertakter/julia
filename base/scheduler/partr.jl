@@ -156,19 +156,24 @@ function multiq_deletemin()
     if ccall(:jl_set_task_tid, Cint, (Any, Cint), task, tid-1) == 0
         # This task is stuck to a thread that's likely sleeping, move the task to it's private queue and wake it up
         # We move this out of the queue to avoid spinning on it
-        ntasks = heap.ntasks
-        @atomic :monotonic heap.ntasks = ntasks - Int32(1)
-        heap.tasks[1] = heap.tasks[ntasks]
-        Base._unsetindex!(heap.tasks, Int(ntasks))
-        prio1 = typemax(UInt16)
-        if ntasks > 1
-            multiq_sift_down(heap, Int32(1))
-            prio1 = heap.tasks[1].priority
+        tid2 = Threads.threadid(task)
+        if tid2 != 0
+            ntasks = heap.ntasks
+            @atomic :monotonic heap.ntasks = ntasks - Int32(1)
+            heap.tasks[1] = heap.tasks[ntasks]
+            Base._unsetindex!(heap.tasks, Int(ntasks))
+            prio1 = typemax(UInt16)
+            if ntasks > 1
+                multiq_sift_down(heap, Int32(1))
+                prio1 = heap.tasks[1].priority
+            end
+            @atomic :monotonic heap.priority = prio1
+            push!(Base.workqueue_for(tid2), task)
+            unlock(heap.lock)
+            ccall(:jl_wakeup_thread, Cvoid, (Int16,), (tid2 - 1) % Int16)
+        else
+            unlock(heap.lock)
         end
-        @atomic :monotonic heap.priority = prio1
-        push!(Base.workqueue_for(tid), t)
-        unlock(heap.lock)
-        ccall(:jl_wakeup_thread, Cvoid, (Int16,), (tid - 1) % Int16)
         @goto retry
     end
     ntasks = heap.ntasks
@@ -191,6 +196,9 @@ function multiq_check_empty()
     tp = ccall(:jl_threadpoolid, Int8, (Int16,), tid-1) + 1
     if tp == 0 # Foreign thread
         return true
+    end
+    if !isempty(Base.workqueue_for(tid))
+        return false
     end
     for i = UInt32(1):length(heaps[tp])
         if heaps[tp][i].ntasks != 0

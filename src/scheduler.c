@@ -448,6 +448,8 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *trypoptask, jl_value_t *q, 
     uint64_t start_cycles = 0;
     // Don't count as spinning for the first spin iteration
     int is_spinning = 0;
+    assert(jl_atomic_load_relaxed(&jl_n_threads_spinning) >= 0 && jl_atomic_load_relaxed(&jl_n_threads_spinning) <= jl_n_threads);
+    assert(jl_atomic_load_relaxed(&n_threads_idle) >= 0 && jl_atomic_load_relaxed(&n_threads_idle) <= jl_n_threads);
     while (1) {
         jl_task_t *task = get_next_task(trypoptask, q);
         if (task) {
@@ -473,7 +475,8 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *trypoptask, jl_value_t *q, 
             // acquire sleep-check lock
             assert(jl_atomic_load_relaxed(&ptls->sleep_check_state) == not_sleeping);
             jl_atomic_store_relaxed(&ptls->sleep_check_state, sleeping);
-            jl_atomic_fetch_add_relaxed(&jl_n_threads_spinning, -1);
+            if (is_spinning)
+                jl_atomic_fetch_add_relaxed(&jl_n_threads_spinning, -1);
             jl_atomic_fetch_add_relaxed(&n_threads_idle, 1);
             jl_fence(); // [^store_buffering_1]
             JL_PROBE_RT_SLEEP_CHECK_SLEEP(ptls);
@@ -481,6 +484,9 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *trypoptask, jl_value_t *q, 
                 if (set_not_sleeping(ptls)) {
                     JL_PROBE_RT_SLEEP_CHECK_TASKQ_WAKE(ptls);
                 }
+                if (is_spinning)
+                    jl_atomic_fetch_add_relaxed(&jl_n_threads_spinning, 1);
+                jl_atomic_fetch_add_relaxed(&n_threads_idle, -1);
                 continue;
             }
             volatile int isrunning = 1;
@@ -492,12 +498,18 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *trypoptask, jl_value_t *q, 
                     if (set_not_sleeping(ptls)) {
                         JL_PROBE_RT_SLEEP_CHECK_TASK_WAKE(ptls);
                     }
+                    if (is_spinning)
+                        jl_atomic_fetch_add_relaxed(&jl_n_threads_spinning, 1);
+                    jl_atomic_fetch_add_relaxed(&n_threads_idle, -1);
                     continue; // jump to JL_CATCH
                 }
                 if (task) {
                     if (set_not_sleeping(ptls)) {
                         JL_PROBE_RT_SLEEP_CHECK_TASK_WAKE(ptls);
                     }
+                    if (is_spinning)
+                        jl_atomic_fetch_add_relaxed(&jl_n_threads_spinning, 1);
+                    jl_atomic_fetch_add_relaxed(&n_threads_idle, -1);
                     continue; // jump to JL_CATCH
                 }
 
@@ -558,6 +570,9 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *trypoptask, jl_value_t *q, 
                         if (set_not_sleeping(ptls)) {
                             JL_PROBE_RT_SLEEP_CHECK_UV_WAKE(ptls);
                         }
+                        if (is_spinning)
+                            jl_atomic_fetch_add_relaxed(&jl_n_threads_spinning, 1);
+                        jl_atomic_fetch_add_relaxed(&n_threads_idle, -1);
                         start_cycles = 0;
                         continue; // jump to JL_CATCH
                     }
@@ -567,6 +582,9 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *trypoptask, jl_value_t *q, 
                         if (set_not_sleeping(ptls)) {
                             JL_PROBE_RT_SLEEP_CHECK_UV_WAKE(ptls);
                         }
+                        if (is_spinning)
+                            jl_atomic_fetch_add_relaxed(&jl_n_threads_spinning, 1);
+                        jl_atomic_fetch_add_relaxed(&n_threads_idle, -1);
                         start_cycles = 0;
                         continue; // jump to JL_CATCH
                     }
@@ -612,8 +630,9 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *trypoptask, jl_value_t *q, 
                     // else should we warn the user of certain deadlock here if tid == 0 && n_threads_running == 0?
                     uv_cond_wait(&ptls->wake_signal, &ptls->sleep_lock);
                 }
+                if (is_spinning)
+                    jl_atomic_fetch_add_relaxed(&jl_n_threads_spinning, 1);
                 jl_atomic_fetch_add_relaxed(&n_threads_idle, -1);
-                jl_atomic_fetch_add_relaxed(&jl_n_threads_spinning, 1);
                 assert(jl_atomic_load_relaxed(&ptls->sleep_check_state) == not_sleeping);
                 assert(jl_atomic_load_relaxed(&n_threads_running));
                 start_cycles = 0;
