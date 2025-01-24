@@ -89,7 +89,7 @@ External links:
 #include "julia_assert.h"
 
 static const size_t WORLD_AGE_REVALIDATION_SENTINEL = 0x1;
-size_t jl_require_world = ~(size_t)0;
+JL_DLLEXPORT size_t jl_require_world = ~(size_t)0;
 
 #include "staticdata_utils.c"
 #include "precompile_utils.c"
@@ -1674,8 +1674,18 @@ static void jl_write_values(jl_serializer_state *s) JL_GC_DISABLED
 #ifndef _P64
             write_uint(f, decode_restriction_kind(pku));
 #endif
-            write_uint(f, bpart->min_world);
-            write_uint(f, jl_atomic_load_relaxed(&bpart->max_world));
+            size_t max_world = jl_atomic_load_relaxed(&bpart->max_world);
+            if (max_world == ~(size_t)0) {
+                // Still valid. Will be considered primordial after re-load.
+                // We could consider updating min_world to the loaded world, but
+                // there doesn't appear to be much point.
+                write_uint(f, 0);
+                write_uint(f, max_world);
+            } else {
+                // The world will not be reachable after loading
+                write_uint(f, 1);
+                write_uint(f, 0);
+            }
             write_pointerfield(s, (jl_value_t*)jl_atomic_load_relaxed(&bpart->next));
 #ifdef _P64
             write_uint(f, decode_restriction_kind(pku)); // This will be moved back into place during deserialization (if necessary)
@@ -2714,7 +2724,6 @@ static void jl_strip_all_codeinfos(void)
 jl_genericmemory_t *jl_global_roots_list;
 jl_genericmemory_t *jl_global_roots_keyset;
 jl_mutex_t global_roots_lock;
-extern jl_mutex_t world_counter_lock;
 
 jl_mutex_t precompile_field_replace_lock;
 jl_svec_t *precompile_field_replace JL_GLOBALLY_ROOTED;
@@ -4110,11 +4119,12 @@ static jl_value_t *jl_restore_package_image_from_stream(void* pkgimage_handle, i
                 jl_atomic_store_release(&jl_world_counter, world);
             // now permit more methods to be added again
             JL_UNLOCK(&world_counter_lock);
-            // but one of those immediate users is going to be our cache insertions
-            jl_insert_backedges((jl_array_t*)edges, (jl_array_t*)new_ext_cis); // restore existing caches (needs to be last)
+
             // reinit ccallables
             jl_reinit_ccallable(&ccallable_list, base, pkgimage_handle);
             arraylist_free(&ccallable_list);
+
+            jl_value_t *ext_edges = new_ext_cis ? (jl_value_t*)new_ext_cis : jl_nothing;
 
             if (completeinfo) {
                 cachesizes_sv = jl_alloc_svec(7);
@@ -4125,12 +4135,11 @@ static jl_value_t *jl_restore_package_image_from_stream(void* pkgimage_handle, i
                 jl_svecset(cachesizes_sv, 4, jl_box_long(cachesizes.reloclist));
                 jl_svecset(cachesizes_sv, 5, jl_box_long(cachesizes.gvarlist));
                 jl_svecset(cachesizes_sv, 6, jl_box_long(cachesizes.fptrlist));
-                restored = (jl_value_t*)jl_svec(7, restored, init_order, extext_methods,
-                                                   new_ext_cis ? (jl_value_t*)new_ext_cis : jl_nothing,
-                                                   method_roots_list, edges, cachesizes_sv);
+                restored = (jl_value_t*)jl_svec(7, restored, init_order, edges, ext_edges,
+                                                   extext_methods, method_roots_list, cachesizes_sv);
             }
             else {
-                restored = (jl_value_t*)jl_svec(2, restored, init_order);
+                restored = (jl_value_t*)jl_svec(4, restored, init_order, edges, ext_edges);
             }
         }
     }
