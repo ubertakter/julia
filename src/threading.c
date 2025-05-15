@@ -1,11 +1,9 @@
 // This file is a part of Julia. License is MIT: https://julialang.org/license
-
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
-
 #include "julia.h"
 #include "julia_internal.h"
 #include "julia_assert.h"
@@ -228,10 +226,6 @@ void jl_set_pgcstack(jl_gcframe_t **pgcstack) JL_NOTSAFEPOINT
 {
     *jl_pgcstack_key() = pgcstack;
 }
-#  if JL_USE_IFUNC
-JL_DLLEXPORT __attribute__((weak))
-void jl_register_pgcstack_getter(void);
-#  endif
 static jl_gcframe_t **jl_get_pgcstack_init(void);
 static jl_get_pgcstack_func *jl_get_pgcstack_cb = jl_get_pgcstack_init;
 static jl_gcframe_t **jl_get_pgcstack_init(void)
@@ -244,15 +238,8 @@ static jl_gcframe_t **jl_get_pgcstack_init(void)
     // This is clearly not thread-safe but should be fine since we
     // make sure the tls states callback is finalized before adding
     // multiple threads
-#  if JL_USE_IFUNC
-    if (jl_register_pgcstack_getter)
-        jl_register_pgcstack_getter();
-    else
-#  endif
-    {
-        jl_get_pgcstack_cb = jl_get_pgcstack_fallback;
-        jl_pgcstack_key = &jl_pgcstack_addr_fallback;
-    }
+    jl_get_pgcstack_cb = jl_get_pgcstack_fallback;
+    jl_pgcstack_key = &jl_pgcstack_addr_fallback;
     return jl_get_pgcstack_cb();
 }
 
@@ -322,6 +309,11 @@ JL_DLLEXPORT uint64_t jl_get_ptls_rng(void) JL_NOTSAFEPOINT
     return jl_current_task->ptls->rngseed;
 }
 
+
+#if !defined(_OS_WINDOWS_) && !defined(JL_DISABLE_LIBUNWIND) && !defined(LLVMLIBUNWIND)
+    extern int unw_ensure_tls (void);
+#endif
+
 // get thread local rng
 JL_DLLEXPORT void jl_set_ptls_rng(uint64_t new_seed) JL_NOTSAFEPOINT
 {
@@ -336,7 +328,17 @@ jl_ptls_t jl_init_threadtls(int16_t tid)
 #endif
     if (jl_get_pgcstack() != NULL)
         abort();
-    jl_ptls_t ptls = (jl_ptls_t)calloc(1, sizeof(jl_tls_states_t));
+    jl_ptls_t ptls;
+#if defined(_OS_WINDOWS_)
+    ptls = _aligned_malloc(sizeof(jl_tls_states_t), alignof(jl_tls_states_t));
+    if (ptls == NULL)
+        abort();
+#else
+    if (posix_memalign((void**)&ptls, alignof(jl_tls_states_t), sizeof(jl_tls_states_t)))
+        abort();
+#endif
+    memset(ptls, 0, sizeof(jl_tls_states_t));
+
 #ifndef _OS_WINDOWS_
     pthread_setspecific(jl_task_exit_key, (void*)ptls);
 #endif
@@ -424,7 +426,6 @@ static void jl_init_task_lock(jl_task_t *ct)
     }
 }
 
-
 JL_DLLEXPORT jl_gcframe_t **jl_adopt_thread(void)
 {
     // `jl_init_threadtls` puts us in a GC unsafe region, so ensure GC isn't running.
@@ -450,6 +451,22 @@ JL_DLLEXPORT jl_gcframe_t **jl_adopt_thread(void)
     return &ct->gcstack;
 }
 
+JL_DLLEXPORT jl_gcframe_t **jl_autoinit_and_adopt_thread(void)
+{
+    if (!jl_is_initialized()) {
+        void *retaddr = __builtin_extract_return_addr(__builtin_return_address(0));
+        void *handle = jl_find_dynamic_library_by_addr(retaddr, 0);
+        if (handle == NULL) {
+            fprintf(stderr, "error: runtime auto-initialization failed due to bad sysimage lookup\n"
+                            "       (this should not happen, please file a bug report)\n");
+            exit(1);
+        }
+        jl_init_with_image_handle(handle);
+        return &jl_get_current_task()->gcstack;
+    }
+
+    return jl_adopt_thread();
+}
 
 void jl_safepoint_suspend_all_threads(jl_task_t *ct)
 {
@@ -698,15 +715,15 @@ void jl_init_threading(void)
     // and `jl_n_threads_per_pool`.
     jl_n_threadpools = 2;
     int16_t nthreads = JULIA_NUM_THREADS;
-    int16_t nthreadsi = 0;
+    // if generating output default to 0 interactive threads, otherwise default to 1
+    int16_t nthreadsi = jl_generating_output() ? 0 : 1;
     char *endptr, *endptri;
 
     if (jl_options.nthreads != 0) { // --threads specified
         nthreads = jl_options.nthreads_per_pool[0];
         if (nthreads < 0)
             nthreads = jl_effective_threads();
-        if (jl_options.nthreadpools == 2)
-            nthreadsi = jl_options.nthreads_per_pool[1];
+        nthreadsi = (jl_options.nthreadpools == 1) ? 0 : jl_options.nthreads_per_pool[1];
     }
     else if ((cp = getenv(NUM_THREADS_NAME))) { // ENV[NUM_THREADS_NAME] specified
         if (!strncmp(cp, "auto", 4)) {
@@ -722,13 +739,16 @@ void jl_init_threading(void)
         }
         if (*cp == ',') {
             cp++;
-            if (!strncmp(cp, "auto", 4))
+            if (!strncmp(cp, "auto", 4)) {
                 nthreadsi = 1;
+                cp += 4;
+            }
             else {
                 errno = 0;
                 nthreadsi = strtol(cp, &endptri, 10);
                 if (errno != 0 || endptri == cp || nthreadsi < 0)
-                    nthreadsi = 0;
+                    nthreadsi = 1;
+                cp = endptri;
             }
         }
     }

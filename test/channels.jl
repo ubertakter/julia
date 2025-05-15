@@ -463,15 +463,14 @@ end
         cb = first(async.cond.waitq)
         @test isopen(async)
         ccall(:uv_async_send, Cvoid, (Ptr{Cvoid},), async)
-        ccall(:uv_async_send, Cvoid, (Ptr{Cvoid},), async)
-        @test isempty(Base.Workqueue)
         Base.process_events() # schedule event
         Sys.iswindows() && Base.process_events() # schedule event (windows?)
-        @test length(Base.Workqueue) == 1
         ccall(:uv_async_send, Cvoid, (Ptr{Cvoid},), async)
         @test tc[] == 0
         yield() # consume event
         @test tc[] == 1
+        ccall(:uv_async_send, Cvoid, (Ptr{Cvoid},), async)
+        Base.process_events()
         Sys.iswindows() && Base.process_events() # schedule event (windows?)
         yield() # consume event
         @test tc[] == 2
@@ -619,6 +618,16 @@ let a = Ref(0)
     make_unrooted_timer(a)
     GC.gc()
     @test a[] == 1
+end
+
+@testset "Timer properties" begin
+    t = Timer(1.0, interval = 0.5)
+    @test t.timeout == 1.0
+    @test t.interval == 0.5
+    close(t)
+    @test !isopen(t)
+    @test t.timeout == 1.0
+    @test t.interval == 0.5
 end
 
 # trying to `schedule` a finished task

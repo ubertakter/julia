@@ -130,9 +130,6 @@ end
                             ("--startup-file=no",   false),
                             ("--startup-file=yes",  true),
 
-                            # ("--sysimage-native-code=no",   false), # takes a lot longer (30s)
-                            ("--sysimage-native-code=yes",  true),
-
                             ("--pkgimages=yes", true),
                             ("--pkgimages=no",  false),
                         )
@@ -255,6 +252,16 @@ let exename = `$(Base.julia_cmd()) --startup-file=no --color=no`
     let expanded = abspath(Base.load_path_expand("@foo"))
         @test expanded == readchomp(`$exename --project='@foo' -e 'println(Base.active_project())'`)
         @test expanded == readchomp(addenv(`$exename -e 'println(Base.active_project())'`, "JULIA_PROJECT" => "@foo", "HOME" => homedir()))
+    end
+
+    # --project=@script handling
+    let expanded = abspath(joinpath(@__DIR__, "project", "ScriptProject"))
+        script = joinpath(expanded, "bin", "script.jl")
+        # Check running julia with --project=@script both within and outside the script directory
+        @testset "--@script from $name" for (name, dir) in [("project", expanded), ("outside", pwd())]
+            @test joinpath(expanded, "Project.toml") == readchomp(Cmd(`$exename --project=@script $script`; dir))
+            @test joinpath(expanded, "SubProject", "Project.toml") == readchomp(Cmd(`$exename --project=@script/../SubProject $script`; dir))
+        end
     end
 
     # handling of `@temp` in --project and JULIA_PROJECT
@@ -753,7 +760,7 @@ let exename = `$(Base.julia_cmd()) --startup-file=no --color=no`
         @test errors_not_signals(`$exename -E "$code" --depwarn=error`)
 
         @test readchomperrors(`$exename -E "$code" --depwarn=yes`) ==
-            (true, "true", "WARNING: Foo.Deprecated is deprecated, use NotDeprecated instead.\n  likely near none:8")
+            (true, "true", "WARNING: Use of Foo.Deprecated is deprecated, use NotDeprecated instead.\n  likely near none:8")
 
         @test readchomperrors(`$exename -E "$code" --depwarn=no`) ==
             (true, "true", "")
@@ -798,7 +805,10 @@ let exename = `$(Base.julia_cmd()) --startup-file=no --color=no`
 
     # --worker takes default / custom as argument (default/custom arguments
     # tested in test/parallel.jl)
-    @test errors_not_signals(`$exename --worker=true`)
+    # shorten the worker timeout as this test relies on it timing out
+    withenv("JULIA_WORKER_TIMEOUT" => "10") do
+        @test errors_not_signals(`$exename --worker=true`)
+    end
 
     # --trace-compile
     let
@@ -1043,7 +1053,7 @@ let exename = `$(Base.julia_cmd().exec[1]) -t 1`
         p = run(pipeline(`$exename --sysimage=$libjulia`, stderr=err), wait=false)
         close(err.in)
         let s = read(err, String)
-            @test s == "ERROR: System image file failed consistency check: maybe opened the wrong version?\n"
+            @test s == "ERROR: Image file failed consistency check: maybe opened the wrong version?\n"
         end
         @test errors_not_signals(p)
         @test p.exitcode == 1
@@ -1073,17 +1083,12 @@ run(pipeline(devnull, `$(joinpath(Sys.BINDIR, Base.julia_exename())) --lisp`, de
 @test readchomperrors(`$(joinpath(Sys.BINDIR, Base.julia_exename())) -Cnative --lisp`) ==
     (false, "", "ERROR: --lisp must be specified as the first argument")
 
-# --sysimage-native-code={yes|no}
-let exename = `$(Base.julia_cmd()) --startup-file=no`
-    @test readchomp(`$exename --sysimage-native-code=yes -E
-        "Bool(Base.JLOptions().use_sysimage_native_code)"`) == "true"
-    @test readchomp(`$exename --sysimage-native-code=no -E
-        "Bool(Base.JLOptions().use_sysimage_native_code)"`) == "false"
-end
-
 # backtrace contains line number info (esp. on windows #17179)
-for precomp in ("yes", "no")
-    succ, out, bt = readchomperrors(`$(Base.julia_cmd()) --startup-file=no --sysimage-native-code=$precomp -E 'sqrt(-2)'`)
+let
+    # TODO: Make this safe in the presence of two single-thread threadpools with
+    # --sysimage-native-code=no, though that option is deprecated.
+    # see https://github.com/JuliaLang/julia/issues/57198
+    succ, out, bt = readchomperrors(`$(Base.julia_cmd()) --startup-file=no -E 'sqrt(-2)'`)
     @test !succ
     @test out == ""
     @test occursin(r"\.jl:(\d+)", bt)
