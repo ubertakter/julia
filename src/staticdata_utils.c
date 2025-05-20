@@ -83,8 +83,14 @@ static uint64_t jl_worklist_key(jl_array_t *worklist) JL_NOTSAFEPOINT
 }
 
 static jl_array_t *newly_inferred JL_GLOBALLY_ROOTED /*FIXME*/;
+static _Atomic(int) track_newly_inferred = 0;
 // Mutex for newly_inferred
 jl_mutex_t newly_inferred_mutex;
+
+JL_DLLEXPORT void jl_track_newly_inferred(int enable)
+{
+    jl_atomic_store_release(&track_newly_inferred, enable);
+}
 
 // Register array of newly-inferred MethodInstances
 // This gets called as the first step of Base.include_package_for_output
@@ -97,9 +103,11 @@ JL_DLLEXPORT void jl_set_newly_inferred(jl_value_t* _newly_inferred)
 JL_DLLEXPORT void jl_push_newly_inferred(jl_value_t* ci)
 {
     JL_LOCK(&newly_inferred_mutex);
-    size_t end = jl_array_len(newly_inferred);
-    jl_array_grow_end(newly_inferred, 1);
-    jl_arrayset(newly_inferred, ci, end);
+    if (jl_atomic_load_acquire(&track_newly_inferred)) {
+        size_t end = jl_array_len(newly_inferred);
+        jl_array_grow_end(newly_inferred, 1);
+        jl_arrayset(newly_inferred, ci, end);
+    }
     JL_UNLOCK(&newly_inferred_mutex);
 }
 
@@ -1131,7 +1139,11 @@ static void jl_insert_backedges(jl_array_t *edges, jl_array_t *ext_targets, jl_a
         else {
             assert(ci->max_world == ~(size_t)0);
             jl_method_instance_t *caller = ci->def;
-            if (ci->inferred && jl_rettype_inferred(caller, minworld, ~(size_t)0) == jl_nothing) {
+            jl_code_instance_t *inferred = (jl_code_instance_t *)jl_rettype_inferred(caller, minworld, ~(size_t)0);
+            if (ci->inferred && (jl_value_t *)inferred != jl_nothing) {
+                jl_mi_cache_insert(caller, ci);
+            } else if (inferred != NULL && ci->invoke != NULL && jl_atomic_load_relaxed(&inferred->invoke) == NULL) {
+                // new CI has fresh code for us
                 jl_mi_cache_insert(caller, ci);
             }
             //jl_static_show((jl_stream*)ios_stderr, (jl_value_t*)caller);
@@ -1176,7 +1188,11 @@ static void jl_insert_backedges(jl_array_t *edges, jl_array_t *ext_targets, jl_a
             jl_code_instance_t *codeinst = (jl_code_instance_t*)ci;
             assert(codeinst->min_world == minworld && codeinst->inferred);
             codeinst->max_world = maxvalid;
-            if (jl_rettype_inferred(caller, minworld, maxvalid) == jl_nothing) {
+            jl_code_instance_t *inferred = (jl_code_instance_t *)jl_rettype_inferred(caller, minworld, ~(size_t)0);
+            if (codeinst->inferred && (jl_value_t *)inferred != jl_nothing) {
+                jl_mi_cache_insert(caller, codeinst);
+            } else if (inferred != NULL && codeinst->invoke != NULL && jl_atomic_load_relaxed(&inferred->invoke) == NULL) {
+                // new CI has fresh code for us
                 jl_mi_cache_insert(caller, codeinst);
             }
         }
